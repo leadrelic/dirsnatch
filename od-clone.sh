@@ -43,7 +43,11 @@ PROXY_TOOL=""
 TARGET=""
 PORTS_OPT=""
 OUT_DIR=""
-TIMEOUT=20
+TIMEOUT=20      # whole-request cap for directory listings and hash re-verification only;
+                # file downloads use a stall detector instead (see download_worker)
+STALL_SECS=60   # abort a download only if it moves < 1 KB/s for this long
+FILES_SUBDIR="files"  # cloned content lives here so a remote file can never collide
+                      # with manifest.json / .od-clone.log / .counters
 USING_VPN=""   # "" = ask, set to "yes"/"no" once asked
 SKIP_CHECKS=0  # no longer settable — quick/skip-checks mode was removed; kept at 0 for any leftover references
 CONCURRENCY=4
@@ -111,7 +115,21 @@ human_size() {
 }
 
 json_escape() {
-  printf '%s' "$1" | sed 's/\\/\\\\/g; s/"/\\"/g'
+  # Escape backslash and quote, then drop control characters (a hostile
+  # filename containing a newline/tab would otherwise produce invalid JSON).
+  printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177' | sed 's/\\/\\\\/g; s/"/\\"/g'
+}
+
+# Listing entries come from a server we don't trust. Reject anything that
+# could escape the output directory or confuse the terminal: a ".." path
+# segment anywhere (not just at the start), or control characters.
+unsafe_entry() {
+  local e="$1"
+  case "/$e/" in
+    */../*) return 0 ;;
+  esac
+  [[ "$e" == *[[:cntrl:]]* ]] && return 0
+  return 1
 }
 
 # ---------- Ctrl+C handling ----------
@@ -568,6 +586,10 @@ discover_dir() {
 
   while IFS= read -r entry; do
     [[ -z "$entry" ]] && continue
+    if unsafe_entry "$entry"; then
+      warn "  ignoring unsafe listing entry from server (path traversal or control chars): $(printf '%s' "$entry" | LC_ALL=C tr -c '[:print:]' '?')"
+      continue
+    fi
     name="$(basename "${entry%/}")"
     if [[ "$entry" == */ ]]; then
       full_url="${dir_url%/}/${entry}"
@@ -706,6 +728,23 @@ write_manifest_entry() {
 
 merge_manifest() {
   local manifest_dir="$1" out_file="$2"
+  # Carry forward records from the previous manifest.json for any URL this
+  # run didn't touch. This run only queues new/failed files, so without this
+  # the rewrite would silently drop the chain-of-custody record of every
+  # file cloned earlier. Entries from this run win over older ones.
+  if [[ -f "$out_file" ]]; then
+    local seen line u n=0
+    seen="$(mktemp)"
+    cat "$manifest_dir"/entry.* 2>/dev/null | grep -oE '"url":"[^"]*"' | sort -u > "$seen"
+    while IFS= read -r line; do
+      u="$(printf '%s' "$line" | grep -oE '"url":"[^"]*"' | head -1)"
+      [[ -n "$u" ]] || continue
+      grep -qxF -- "$u" "$seen" && continue
+      n=$((n + 1))
+      printf '%s\n' "$line" > "$manifest_dir/entry.prev.$n"
+    done < <(grep '^{"url"' "$out_file")
+    rm -f "$seen"
+  fi
   {
     echo "["
     local first=1 f
@@ -716,7 +755,7 @@ merge_manifest() {
     done
     echo
     echo "]"
-  } > "$out_file"
+  } > "$out_file.tmp" && mv -f "$out_file.tmp" "$out_file"
 }
 
 # ---------- compare against a previous run's manifest ----------
@@ -739,7 +778,9 @@ compare_with_previous_manifest() {
   local source_note="" old_count=0
 
   if [[ -f "$manifest_out" ]]; then
-    grep -oE '"url":"[^"]*"' "$manifest_out" | sed -E 's/"url":"//; s/"$//' | sort -u > "$old_urls_file"
+    # Entries that were skipped (failed) last time are deliberately left out
+    # of the "already seen" set, so they show up as new and get retried.
+    grep -v '"status":"skipped"' "$manifest_out" | grep -oE '"url":"[^"]*"' | sed -E 's/"url":"//; s/"$//' | sort -u > "$old_urls_file"
     old_count=$(grep -c . "$old_urls_file" 2>/dev/null)
     old_count=${old_count:-0}
     if [[ "$old_count" -gt 0 ]]; then
@@ -754,14 +795,23 @@ compare_with_previous_manifest() {
   # version of this script) or present but empty/corrupt (e.g. an
   # interrupted or failed prior run).
   if [[ "$old_count" -eq 0 ]]; then
-    local existing_count
-    existing_count=$(find "$target_dir" -type f \
+    local existing_count scan_root
+    # New layout keeps cloned content under $FILES_SUBDIR/ (nothing there but
+    # remote files, so no name exclusions needed). Clones made by older
+    # versions kept files directly in the target dir next to the tool's own
+    # bookkeeping files, so that legacy layout still needs the exclusions.
+    if [[ -d "${target_dir%/}/$FILES_SUBDIR" ]]; then
+      scan_root="${target_dir%/}/$FILES_SUBDIR"
+    else
+      scan_root="$target_dir"
+    fi
+    existing_count=$(find "$scan_root" -type f ! -name '*.part' \
       ! -name '.od-clone.log' ! -name '.counters*' ! -name 'manifest*.json' \
       ! -name 'changes_*.json' ! -path '*/.manifest_parts/*' 2>/dev/null | wc -l | tr -d ' ')
     if [[ "$existing_count" -gt 0 ]]; then
       log "  [$target_dir] no usable manifest, but $existing_count existing file(s) on disk"
       log "  reconstructing prior file list from disk contents..."
-      ( cd "$target_dir" && find . -type f \
+      ( cd "$scan_root" && find . -type f ! -name '*.part' \
           ! -name '.od-clone.log' ! -name '.counters*' ! -name 'manifest*.json' \
           ! -name 'changes_*.json' ! -path '*/.manifest_parts/*' \
         | sed 's|^\./||' ) 2>/dev/null | sed "s|^|${base_url%/}/|" | sort -u > "$old_urls_file"
@@ -859,7 +909,8 @@ verify_cached_file() {
   local tmp_path old_sha new_sha size rc
 
   tmp_path="$(mktemp "${local_path}.verify.XXXXXX")"
-  "${PROXY_PREFIX[@]}" "$CURL_BIN" -s -S -L --connect-timeout 10 --max-time "$TIMEOUT" \
+  "${PROXY_PREFIX[@]}" "$CURL_BIN" -s -S -L --connect-timeout 10 \
+    --speed-limit 1024 --speed-time "$STALL_SECS" \
     -A "$USER_AGENT" \
     -o "$tmp_path" "$url" >> "$log_file" 2>&1
   rc=$?
@@ -899,10 +950,21 @@ FILE_MAX_TRIES=3   # 1 initial attempt + 2 retries before skipping a hung/failed
 
 download_worker() {
   local url="$1" base="$2" target_dir="$3" counter_file="$4" manifest_dir="$5" log_file="$6"
-  local rel_path local_path attempt rc success=0 sha size
+  local rel_path local_path part_path attempt rc success=0 sha size
 
-  rel_path="${url#$base}"
-  local_path="${target_dir%/}/${rel_path}"
+  rel_path="${url#"$base"}"
+
+  # Defense in depth: discover_dir already drops unsafe entries, but this is
+  # the point where a path is actually built from server-supplied text.
+  if [[ -z "$rel_path" || "$rel_path" == /* ]] || unsafe_entry "$rel_path"; then
+    write_manifest_entry "$manifest_dir" "$url" "" "skipped" "" ""
+    bump_counter "$counter_file" skipped
+    echo "[$(date '+%H:%M:%S')] SKIPPED (unsafe path rejected): $url" >> "$log_file"
+    return
+  fi
+
+  local_path="${target_dir%/}/${FILES_SUBDIR}/${rel_path}"
+  part_path="${local_path}.part"
   mkdir -p "$(dirname "$local_path")"
 
   if [[ -s "$local_path" ]]; then
@@ -917,13 +979,24 @@ download_worker() {
     return
   fi
 
+  # A .part file left by an earlier interrupted run can't be trusted to
+  # belong to the same version of the remote file, so never resume across
+  # runs. (Resume is only used between retries within this one attempt loop.)
+  rm -f "$part_path"
+
   local http_code http_code_file
   for ((attempt = 1; attempt <= FILE_MAX_TRIES; attempt++)); do
     [[ $INTERRUPTED -eq 1 ]] && return
     http_code_file="$(mktemp 2>/dev/null)"
-    "${PROXY_PREFIX[@]}" "$CURL_BIN" -s -S -L --connect-timeout 10 --max-time "$TIMEOUT" \
+    # No overall --max-time: big files over Tor legitimately take minutes.
+    # Instead abort only if the transfer stalls (< 1 KB/s for STALL_SECS).
+    # -C - resumes the .part file on retry. The file only gets its real name
+    # (mv below) once the transfer has completed, so an interrupted run can
+    # never leave a truncated file that later looks like a finished download.
+    "${PROXY_PREFIX[@]}" "$CURL_BIN" -s -S -L --connect-timeout 10 \
+      --speed-limit 1024 --speed-time "$STALL_SECS" -C - \
       -A "$USER_AGENT" \
-      -o "$local_path" -w '%{http_code}' "$url" > "$http_code_file" 2>> "$log_file"
+      -o "$part_path" -w '%{http_code}' "$url" > "$http_code_file" 2>> "$log_file"
     rc=$?
     http_code="$(cat "$http_code_file" 2>/dev/null)"
     rm -f "$http_code_file"
@@ -931,18 +1004,24 @@ download_worker() {
     # curl only fails (nonzero rc) on connection-level problems, not on HTTP
     # error responses — a 403/404 page comes back as rc=0 with whatever body
     # the server sent, which is why the http_code check matters as much as rc.
-    if [[ $rc -eq 0 && "$http_code" == 2* && -s "$local_path" ]]; then
-      success=1
+    if [[ $rc -eq 0 && "$http_code" == 2* && -s "$part_path" ]]; then
+      mv -f "$part_path" "$local_path" && success=1
       break
     fi
 
-    rm -f "$local_path"
     echo "[$(date '+%H:%M:%S')] attempt $attempt failed (rc=$rc http=${http_code:-none}) for $url" >> "$log_file"
+
+    # rc 33 / HTTP 416: server won't honour the resume range, so the partial
+    # data is unusable. Start that file over on the next attempt.
+    if [[ $rc -eq 33 || "$http_code" == "416" ]]; then
+      rm -f "$part_path"
+    fi
 
     # These HTTP statuses mean the server actively rejected this specific
     # file and a retry won't change that — stop burning attempts on it.
     case "$http_code" in
       401|403|404|410)
+        rm -f "$part_path"
         echo "[$(date '+%H:%M:%S')] not retrying $url — server returned HTTP $http_code" >> "$log_file"
         break
         ;;
@@ -955,6 +1034,7 @@ download_worker() {
     write_manifest_entry "$manifest_dir" "$url" "$local_path" "downloaded" "$size" "$sha"
     bump_counter "$counter_file" downloaded
   else
+    rm -f "$part_path"
     [[ $attempt -gt $FILE_MAX_TRIES ]] && attempt=$FILE_MAX_TRIES
     write_manifest_entry "$manifest_dir" "$url" "" "skipped" "" ""
     bump_counter "$counter_file" skipped
