@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# od-clone.sh — Clone one or more ports of an open directory over torsocks,
+# dirsnatch.sh — Clone one or more ports of an open directory over torsocks,
 # proxychains, or an already-active VPN
 #
 # No command-line flags — just run it. Every choice (target, ports, VPN/proxy
@@ -19,7 +19,7 @@
 # instead of leaving things in a half-written state.
 #
 # Usage:
-#   ./od-clone.sh
+#   ./dirsnatch.sh
 #
 # Requires: wget, curl, and EITHER (torsocks and/or proxychains) OR an
 # active VPN
@@ -47,7 +47,7 @@ TIMEOUT=20      # whole-request cap for directory listings and hash re-verificat
                 # file downloads use a stall detector instead (see download_worker)
 STALL_SECS=60   # abort a download only if it moves < 1 KB/s for this long
 FILES_SUBDIR="files"  # cloned content lives here so a remote file can never collide
-                      # with manifest.json / .od-clone.log / .counters
+                      # with manifest.json / .dirsnatch.log / .counters
 USING_VPN=""   # "" = ask, set to "yes"/"no" once asked
 SKIP_CHECKS=0  # no longer settable — quick/skip-checks mode was removed; kept at 0 for any leftover references
 CONCURRENCY=4
@@ -216,10 +216,10 @@ geolocate_current_ip() {
 
   GEO_LAST_IP=""
   for svc in "${services[@]}"; do
-    err="$("${GEO_CURL_PREFIX[@]}" "$CURL_BIN" -s -S --max-time 6 "$svc" -o /tmp/od-clone-geo.$$ 2>&1 1>/dev/null)"
+    err="$("${GEO_CURL_PREFIX[@]}" "$CURL_BIN" -s -S --max-time 6 "$svc" -o /tmp/dirsnatch-geo.$$ 2>&1 1>/dev/null)"
     rc=$?
-    geo="$(cat /tmp/od-clone-geo.$$ 2>/dev/null)"
-    rm -f /tmp/od-clone-geo.$$
+    geo="$(cat /tmp/dirsnatch-geo.$$ 2>/dev/null)"
+    rm -f /tmp/dirsnatch-geo.$$
     if [[ $rc -eq 0 && -n "$geo" && "$geo" == *'"ip"'* ]]; then
       GEO_LAST_ERROR=""
       break
@@ -496,7 +496,7 @@ fi
 # ---------- output parent dir ----------
 TS="$(date +%Y%m%d_%H%M%S)"
 SAFE_HOST="${HOST_ONLY//[:\/]/_}"
-DEFAULT_OUT_DIR="./od-clone_${SAFE_HOST}_${TS}"
+DEFAULT_OUT_DIR="./dirsnatch_${SAFE_HOST}_${TS}"
 
 if [[ -z "$OUT_DIR" ]]; then
   read -rp "Directory to create for this clone [default: $DEFAULT_OUT_DIR]: " OUT_DIR_INPUT
@@ -806,13 +806,13 @@ compare_with_previous_manifest() {
       scan_root="$target_dir"
     fi
     existing_count=$(find "$scan_root" -type f ! -name '*.part' \
-      ! -name '.od-clone.log' ! -name '.counters*' ! -name 'manifest*.json' \
+      ! -name '.dirsnatch.log' ! -name '.od-clone.log' ! -name '.counters*' ! -name 'manifest*.json' \
       ! -name 'changes_*.json' ! -path '*/.manifest_parts/*' 2>/dev/null | wc -l | tr -d ' ')
     if [[ "$existing_count" -gt 0 ]]; then
       log "  [$target_dir] no usable manifest, but $existing_count existing file(s) on disk"
       log "  reconstructing prior file list from disk contents..."
       ( cd "$scan_root" && find . -type f ! -name '*.part' \
-          ! -name '.od-clone.log' ! -name '.counters*' ! -name 'manifest*.json' \
+          ! -name '.dirsnatch.log' ! -name '.od-clone.log' ! -name '.counters*' ! -name 'manifest*.json' \
           ! -name 'changes_*.json' ! -path '*/.manifest_parts/*' \
         | sed 's|^\./||' ) 2>/dev/null | sed "s|^|${base_url%/}/|" | sort -u > "$old_urls_file"
       old_count=$(grep -c . "$old_urls_file" 2>/dev/null)
@@ -1048,7 +1048,7 @@ clone_one_target() {
   local target_dir="$2"
   mkdir -p "$target_dir"
 
-  local log_file="${target_dir%/}/.od-clone.log"
+  local log_file="${target_dir%/}/.dirsnatch.log"
   : > "$log_file"
 
   FILE_QUEUE=()

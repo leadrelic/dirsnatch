@@ -1,18 +1,18 @@
-# od-clone.sh
+# dirsnatch.sh
 
 Interactive, OPSEC-aware cloning of open directories over Tor, a proxy chain, or a VPN. Built for threat research and for preserving adversary infrastructure before it disappears.
 
 No flags. Run it and answer the prompts.
 
 ```
-./od-clone.sh
+./dirsnatch.sh
 ```
 
 ## Why
 
 Open directories (exposed attacker tooling, exfiltrated data, staging servers) are short-lived. By the time you've checked your VPN, run `wget -r`, and worked out what changed since your last visit, the directory is often gone, or you've touched it without cover.
 
-`od-clone.sh` is built around three guarantees:
+`dirsnatch.sh` is built around three guarantees:
 
 - **Your real IP never reaches the target, and the tool verifies it.** On a VPN, you confirm your egress IP. With torsocks or proxychains, it compares your wrapped and unwrapped IPs and refuses to continue silently if they match.
 - **Every file has a chain-of-custody record.** `manifest.json` stores the URL, local path, SHA-256, size, and timestamp for each file.
@@ -60,10 +60,10 @@ You'll be asked, in order:
 Output:
 
 ```
-od-clone_<host>_<timestamp>/
+dirsnatch_<host>_<timestamp>/
 └── port_8080/
     ├── manifest.json     # cumulative record of every file
-    ├── .od-clone.log     # per-attempt HTTP status, retries, failures
+    ├── .dirsnatch.log    # per-attempt HTTP status, retries, failures
     └── files/            # cloned content, remote structure preserved
 ```
 
