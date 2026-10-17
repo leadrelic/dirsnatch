@@ -74,12 +74,17 @@ Output lands in a directory per target:
 ```
 od-clone_<host>_<timestamp>/
 └── port_8080/
-    ├── manifest.json          # url, local_path, sha256, size, timestamp per file
+    ├── manifest.json          # url, local_path, sha256, size, timestamp per file (cumulative across runs)
     ├── .od-clone.log           # per-attempt log: real HTTP status, retries, failures
-    └── <cloned files, preserving remote directory structure>
+    └── files/
+        └── <cloned files, preserving remote directory structure>
 ```
 
-Re-run it against the same host/output later and it'll only pull what's new, and drop a `changes_<timestamp>.json` showing exactly what appeared or disappeared since your last pass.
+Cloned content lives under `files/` so a file the server happens to serve as `manifest.json` (or `.od-clone.log`) can never overwrite the tool's own records.
+
+Re-run it against the same host/output later and it'll only pull what's new, and drop a `changes_<timestamp>.json` showing exactly what appeared or disappeared since your last pass. Files that failed on a previous run are retried automatically, and `manifest.json` keeps accumulating — entries for files you already have are carried forward, not replaced.
+
+> **Upgrading from an older version:** clones made before the `files/` layout kept their files directly in the target directory. Re-running with hash verification enabled will re-download those into `files/`.
 
 ## A note on the proxy verification
 
@@ -95,6 +100,9 @@ If a download fails, `curl` only reports a nonzero exit code for connection-leve
 
 - The tool will not proceed against a target without either a confirmed VPN or a verified-working proxy wrapper, short of you explicitly overriding that and confirming you understand the risk.
 - Geolocation checks use `ipinfo.io`, `ifconfig.co`, and `api.ipify.org`. The VPN path and the direct half of the proxy comparison hit these services unwrapped by design — they're checking your actual egress, not the target, so this never exposes anything to the infrastructure you're investigating.
+- The directory listing is treated as untrusted input. Entries containing a `..` path segment or control characters are ignored (with a warning), so a hostile server can't make the tool write outside the output directory.
+- Downloads go to `<name>.part` and are renamed only once the transfer completes, so an interrupted run never leaves a truncated file that looks finished. Large files aren't subject to a fixed time limit — a transfer is only aborted if it stalls (under 1 KB/s for 60 seconds) — and retries within a run resume where they left off. Leftover `.part` files from an interrupted run are discarded and re-downloaded from scratch, since the remote file may have changed.
+- Cloned files are untrusted adversary content. Nothing is ever executed, but handle the output directory accordingly (isolated VM or analysis host, no auto-open, no execute bits).
 - The manifest's SHA-256 hashes and timestamps are meant to support downstream chain-of-custody needs (e.g. handing findings to law enforcement or notifying an affected party) — treat `manifest.json` as part of the evidence, not just metadata.
 
 ## Known limitations
