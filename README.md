@@ -112,17 +112,6 @@ If a download fails, `curl` only reports a nonzero exit code for connection-leve
 - Recursion depth is bounded only by your system's process/stack limits — a pathologically deep directory tree could theoretically hit that ceiling.
 - The proxy-route check confirms the wrapper changes your IP, not that it's routing through the specific network path you expect (e.g. a specific Tor exit country) — it catches "not working at all," not "working differently than intended."
 
-## Companion tool: ioc-extract.py
-
-A Python script meant to run against a completed clone's output directory — walks every file (filenames and content) and pulls out:
-
-- Every public IPv4 address (private/loopback/CGNAT/reserved ranges and known certificate/LDAP OID false-positives filtered out), sorted by how many files it showed up in.
-- Hardcoded secrets: cloud provider keys, NTLM/Kerberoast hash formats, mimikatz-style output, NetExec/CrackMapExec success lines, DB connection strings, private key blocks, and more.
-
-```bash
-python3 ioc-extract.py <clone_output_dir>
-```
-
 ## Disclaimer
 
 For authorized security research, threat intelligence collection, and defensive use only. You are responsible for ensuring you have authorization to access and collect from any target you point this at.
